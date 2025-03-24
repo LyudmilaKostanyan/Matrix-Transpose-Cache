@@ -1,0 +1,127 @@
+name: Cross platform build
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        build_type: [Release]
+        c_compiler: [gcc, clang, cl]
+        include:
+          - os: windows-latest
+            c_compiler: cl
+            cpp_compiler: cl
+          - os: ubuntu-latest
+            c_compiler: gcc
+            cpp_compiler: g++
+          - os: ubuntu-latest
+            c_compiler: clang
+            cpp_compiler: clang++
+        exclude:
+          - os: windows-latest
+            c_compiler: gcc
+          - os: windows-latest
+            c_compiler: clang
+          - os: ubuntu-latest
+            c_compiler: cl
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set reusable strings
+      id: strings
+      shell: bash
+      run: echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
+    - name: Install dependencies (Linux & macOS)
+      if: runner.os != 'Windows'
+      run: |
+        if [ $RUNNER_OS == "macOS" ]; then
+          brew install cmake gcc
+        else
+          sudo apt update && sudo apt install -y cmake g++
+        fi
+
+    - name: Install dependencies (Windows)
+      if: runner.os == 'Windows'
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: mingw64
+        install: mingw-w64-x86_64-cmake mingw-w64-x86_64-gcc
+
+    - name: Configure CMake project (Linux & macOS)
+      if: runner.os != 'Windows'
+      run: |
+        cmake -S . -B build
+      
+    - name: Configure CMake project (Windows)
+      if: runner.os == 'Windows'
+      shell: msys2 {0}
+      run: |
+        cmake -S . -B build
+
+    - name: Build C++ code (Linux & macOS)
+      if: runner.os != 'Windows'
+      run: |
+        cmake --build build
+      
+    - name: Build C++ code (Windows)
+      if: runner.os == 'Windows'
+      shell: msys2 {0}
+      run: |
+        cmake --build build
+
+    - name: Run tests (Linux & macOS)
+      if: runner.os != 'Windows'
+      run: |
+        cd build
+        ./main --row_size 5000
+
+    - name: Run tests (Windows)
+      if: runner.os == 'Windows'
+      shell: msys2 {0}
+      run: |
+        cd build
+        ./main.exe --row_size 5000
+
+    - name: Debug with GDB (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      working-directory: ${{ steps.strings.outputs.build-output-dir }}
+      shell: bash
+      run: |
+        sudo apt-get update && sudo apt-get install -y gdb
+        executable="./main"
+        if [ -f "$executable" ]; then
+          echo "run" > gdb_commands.txt
+          echo "bt full" >> gdb_commands.txt
+          echo "Running GDB:"
+          gdb --batch --quiet -x gdb_commands.txt "$executable"
+        fi
+      continue-on-error: true
+
+    - name: Debug with GDB (Windows)
+      if: matrix.os == 'windows-latest' && matrix.c_compiler == 'g++'
+      shell: bash
+      run: |
+        # Assuming MinGW or Cygwin is installed, or GDB is available in the path
+        gdb_path="C:/MinGW/bin/gdb.exe"
+        executable="main.exe"
+        
+        # Check if GDB is available
+        if command -v "$gdb_path" &> /dev/null; then
+          echo "GDB found, running it"
+          echo "run" > gdb_commands.txt
+          echo "bt full" >> gdb_commands.txt
+          "$gdb_path" --batch --quiet -x gdb_commands.txt "$executable"
+        else
+          echo "GDB not found, skipping debugging"
+        fi
+      continue-on-error: true
