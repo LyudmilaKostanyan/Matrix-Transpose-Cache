@@ -5,13 +5,6 @@ Matrix multiplication is a fundamental operation in many scientific and engineer
 
 This project implements multiple matrix multiplication methods and compares their performance to understand how cache usage affects computation time.
 
-### The Matrix Multiplication Problem  
-Given two square matrices `A` and `B` of size `N × N`, compute the product matrix `C`:
-
-\[
-C_{i,j} = \sum_{k=0}^{N-1} A_{i,k} \times B_{k,j}
-\]
-
 ### Goal
 - Improve performance by optimizing cache usage.
 - Analyze how different multiplication methods (naive, blocked, and recursive) perform with varying matrix sizes.
