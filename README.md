@@ -87,11 +87,13 @@ while (linesPerBlock > numSets * (associativity / 2)) {
 - Checks if the block uses too many cache lines, risking conflicts in the sets.
 - Reduces the block size incrementally (by one cache line’s worth of elements) until it fits comfortably within the cache’s set-associativity constraints.
 
-#### Step 5: Final Block Size
+#### Step 5: Final Adjustments and Return
 ```cpp
+alignedBlockSide = min(alignedBlockSide, n);
 return max(alignedBlockSide, elementsPerCacheLine);
 ```
-- Returns the calculated block side length, ensuring it’s at least as large as one cache line.
+- Ensures the block size doesn’t exceed the matrix dimension `n`.
+- Returns the larger of the calculated block side or one cache line’s worth of elements, guaranteeing a usable minimum.
 
 #### Purpose and Outcome
 This function optimizes block size to:
