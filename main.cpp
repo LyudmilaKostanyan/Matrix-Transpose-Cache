@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <iomanip>
 #include "kaizen.h"
 
 #ifdef _WIN32
@@ -17,6 +18,11 @@
 #include <intrin.h>
 #else
 #include <cpuid.h>
+#endif
+
+#ifdef __APPLE__
+#include <mach/thread_act.h>
+#include <mach/thread_policy.h>
 #endif
 
 using namespace std;
@@ -72,8 +78,7 @@ bool pinToCore(int coreId) {
         return false;
     }
     return true;
-#else
-#ifdef __linux__
+#elif defined(__linux__)
     cpu_set_t mask;
     CPU_ZERO(&mask);
     CPU_SET(coreId, &mask);
@@ -83,10 +88,18 @@ bool pinToCore(int coreId) {
         return false;
     }
     return true;
+#elif defined(__APPLE__)
+    thread_affinity_policy_data_t policy = { coreId };
+    thread_port_t thread = mach_thread_self();
+    kern_return_t ret = thread_policy_set(thread, THREAD_AFFINITY_POLICY, (thread_policy_t)&policy, 1);
+    if (ret != KERN_SUCCESS) {
+        cerr << "Failed to set affinity on macOS: " << ret << endl;
+        return false;
+    }
+    return true;
 #else
     cerr << "Affinity setting not supported on this platform" << endl;
     return false;
-#endif
 #endif
 }
 
@@ -162,42 +175,54 @@ auto measureTime(const vector<vector<int>>& A, vector<vector<int>>& B, int n, in
     else
         naiveTransposeMatrix(A, B, n);
     timer.stop();
-    return timer.duration<zen::timer::msec>();
+    return timer.duration<zen::timer::nsec>().count();
 }
 
-int main() {
-    int selectedCore = selectPerformanceCore();
-    if (!pinToCore(selectedCore)) {
-        cerr << "Failed to pin to core " << selectedCore << ". Continuing without affinity." << endl;
-    } else {
-        cout << "Pinned to core " << selectedCore << endl;
+
+int main(int argc, char** argv) {
+    zen::cmd_args args(argv, argc);
+    int n = 512;
+    if (args.is_present("--n")) {
+        auto num = std::stoi(args.get_options("--n")[0]);
+        if (num > 0)
+            n = num;
     }
+    int selectedCore = selectPerformanceCore();
+    if (!pinToCore(selectedCore))
+        cerr << "Failed to pin to core " << selectedCore << ". Continuing without affinity." << endl;
+    else
+        cout << "Pinned to core " << selectedCore << endl;
 
     int l1CacheSizeKB, associativity, cacheLineSize;
-    if (getCacheParameters(l1CacheSizeKB, associativity, cacheLineSize)) {
-        cout << "Detected L1 cache size: " << l1CacheSizeKB << " KB, Associativity: " << associativity
-             << ", Cache line size: " << cacheLineSize << " bytes" << endl;
-    }
+    getCacheParameters(l1CacheSizeKB, associativity, cacheLineSize);
 
-    int n = 512;
-    vector<int> blockSizes = {16, 32, 64, 128};
+    int optimalBlockSize = calculateOptimalBlockSize(l1CacheSizeKB, associativity, cacheLineSize, n);
+    vector<vector<int>> A(n, vector<int>(n));
+    vector<vector<int>> B(n, vector<int>(n, 0));
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            A[i][j] = i * n + j;
+    vector<vector<int>> B_naive = B;
+    double naiveTime = measureTime(A, B_naive, n, 0, false);
+    double blockTime = measureTime(A, B, n, optimalBlockSize, true);
 
-        int optimalBlockSize = calculateOptimalBlockSize(l1CacheSizeKB, associativity, cacheLineSize, n);
-        cout << "Matrix size n = " << n << ", Calculated optimal blockSize: " << optimalBlockSize << endl;
-
-        vector<vector<int>> A(n, vector<int>(n));
-        vector<vector<int>> B(n, vector<int>(n, 0));
-        for (int i = 0; i < n; i++) {
-            for (int j = 0; j < n; j++) {
-                A[i][j] = i * n + j;
-            }
-        }
-
-        vector<vector<int>> B_naive = B;
-        auto naiveTime = measureTime(A, B_naive, n, 0, false);
-        cout << "Matrix size n = " << n << ", Naive transpose time: " << naiveTime << " ms" << endl;
-        auto blockTime = measureTime(A, B, n, optimalBlockSize, true);
-        cout << "Matrix size n = " << n << ", Block transpose time: " << blockTime << " ms" << endl;
+    cout << "-------------------------------------------------------------------------------------------------------------------------------------------" << endl;
+    cout << " " << setw(18) << left << "Matrix Size (n)" 
+         << setw(20) << "L1 Cache (KB)" 
+         << setw(20) << "Associativity" 
+         << setw(20) << "Cache Line (B)" 
+         << setw(20) << "Naive Time (ns)" 
+         << setw(20) << "Block Time (ns)" 
+         << setw(20) << "Ratio (Naive/Block)" << endl;
+    cout << "-------------------------------------------------------------------------------------------------------------------------------------------" << endl;
+    cout << " " << setw(18) << left << n 
+         << setw(20) << l1CacheSizeKB 
+         << setw(20) << associativity 
+         << setw(20) << cacheLineSize 
+         << setw(20) << fixed << setprecision(2) << (naiveTime / 1000.0)
+         << setw(20) << fixed << setprecision(2) << (blockTime / 1000.0)
+         << setw(20) << fixed << setprecision(2) << (naiveTime / blockTime) << endl;
+    cout << "-------------------------------------------------------------------------------------------------------------------------------------------" << endl;
 
     return 0;
 }
