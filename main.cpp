@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include "kaizen.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -121,11 +122,6 @@ int calculateOptimalBlockSize(int l1CacheSizeKB, int associativity, int cacheLin
     int elementsPerCacheLine = cacheLineSize / sizeof(int);
     int alignedBlockSide = maxBlockSide - (maxBlockSide % elementsPerCacheLine);
 
-    if (n <= 256)
-        alignedBlockSide = min(alignedBlockSide, 32);
-    else if (n > 1024)
-        alignedBlockSide = min(max(alignedBlockSide, 64), n);
-
     int totalCacheLines = l1CacheSizeBytes / cacheLineSize;
     int numSets = totalCacheLines / associativity;
     int linesPerBlock = (alignedBlockSide * alignedBlockSide * sizeof(int)) / cacheLineSize;
@@ -158,16 +154,15 @@ void blockTransposeMatrix(const vector<vector<int>>& A, vector<vector<int>>& B, 
     }
 }
 
-double measureTime(const vector<vector<int>>& A, vector<vector<int>>& B, int n, int blockSize, bool useBlock) {
-    auto start = chrono::high_resolution_clock::now();
-    if (useBlock) {
+auto measureTime(const vector<vector<int>>& A, vector<vector<int>>& B, int n, int blockSize, bool useBlock) {
+    auto timer = zen::timer();
+    timer.start();
+    if (useBlock)
         blockTransposeMatrix(A, B, n, blockSize);
-    } else {
+    else
         naiveTransposeMatrix(A, B, n);
-    }
-    auto end = chrono::high_resolution_clock::now();
-    chrono::duration<double, milli> duration = end - start;
-    return duration.count();
+    timer.stop();
+    return timer.duration<zen::timer::msec>();
 }
 
 int main() {
@@ -184,18 +179,9 @@ int main() {
              << ", Cache line size: " << cacheLineSize << " bytes" << endl;
     }
 
-    vector<int> matrixSizes = {128, 256, 512, 1024, 4096};
-    vector<int> blockSizes = {8, 16, 32, 64, 128};
+    int n = 512;
+    vector<int> blockSizes = {16, 32, 64, 128};
 
-    struct Result {
-        int n;
-        double naiveTime;
-        double minBlockTime;
-        int bestBlockSize;
-    };
-    vector<Result> results;
-
-    for (int n : matrixSizes) {
         int optimalBlockSize = calculateOptimalBlockSize(l1CacheSizeKB, associativity, cacheLineSize, n);
         cout << "Matrix size n = " << n << ", Calculated optimal blockSize: " << optimalBlockSize << endl;
 
@@ -208,37 +194,10 @@ int main() {
         }
 
         vector<vector<int>> B_naive = B;
-        double naiveTime = measureTime(A, B_naive, n, 0, false);
+        auto naiveTime = measureTime(A, B_naive, n, 0, false);
         cout << "Matrix size n = " << n << ", Naive transpose time: " << naiveTime << " ms" << endl;
-
-        cout << "Testing block transpose for n = " << n << endl;
-        double minBlockTime = numeric_limits<double>::max();
-        int bestBlockSize = 0;
-        for (int blockSize : blockSizes) {
-            vector<vector<int>> B_block = B;
-            double blockTime = measureTime(A, B_block, n, blockSize, true);
-            cout << "Block size: " << blockSize << ", Time: " << blockTime << " ms" << endl;
-            if (blockTime < minBlockTime) {
-                minBlockTime = blockTime;
-                bestBlockSize = blockSize;
-            }
-        }
-
-        results.push_back({n, naiveTime, minBlockTime, bestBlockSize});
-    }
-
-    cout << "\nSummary of minimum times:\n";
-    for (const auto& res : results) {
-        cout << "Matrix size n = " << res.n << ":\n";
-        cout << " Calculated optimal blockSize: " << calculateOptimalBlockSize(l1CacheSizeKB, associativity, cacheLineSize, res.n) << "\n";
-        cout << "  Naive transpose: " << res.naiveTime << " ms\n";
-        cout << "  Best block transpose: " << res.minBlockTime << " ms (blockSize = " << res.bestBlockSize << ")\n";
-        if (res.naiveTime < res.minBlockTime) {
-            cout << "  Winner: Naive transpose\n";
-        } else {
-            cout << "  Winner: Block transpose with blockSize = " << res.bestBlockSize << "\n";
-        }
-    }
+        auto blockTime = measureTime(A, B, n, optimalBlockSize, true);
+        cout << "Matrix size n = " << n << ", Block transpose time: " << blockTime << " ms" << endl;
 
     return 0;
 }
