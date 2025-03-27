@@ -12,7 +12,50 @@
 #include <unistd.h>
 #endif
 
+#if defined(_MSC_VER)
+#include <intrin.h>
+#else
+#include <cpuid.h>
+#endif
+
 using namespace std;
+
+void getCpuid(int leaf, int subleaf, unsigned int& eax, unsigned int& ebx, unsigned int& ecx, unsigned int& edx) {
+#if defined(_MSC_VER)
+    int regs[4];
+    __cpuidex(regs, leaf, subleaf);
+    eax = regs[0];
+    ebx = regs[1];
+    ecx = regs[2];
+    edx = regs[3];
+#else
+    __cpuid_count(leaf, subleaf, eax, ebx, ecx, edx);
+#endif
+}
+
+bool getCacheParameters(int& l1CacheSizeKB, int& associativity, int& cacheLineSize) {
+    unsigned int eax, ebx, ecx, edx;
+
+    for (int i = 0; i < 10; i++) {
+        getCpuid(4, i, eax, ebx, ecx, edx);
+
+        if ((eax & 0x1F) == 0) break;
+
+        int cacheType = eax & 0x1F;
+        if (cacheType == 1 || cacheType == 3) {
+            l1CacheSizeKB = ((ebx >> 22) + 1) * (((ebx >> 12) & 0x3FF) + 1) * ((ebx & 0xFFF) + 1) * (ecx + 1) / 1024;
+            associativity = (ebx >> 22) + 1;
+            cacheLineSize = (ebx & 0xFFF) + 1;
+            return true;
+        }
+    }
+
+    l1CacheSizeKB = 32;
+    associativity = 8;
+    cacheLineSize = 64;
+    cerr << "Warning: Could not detect cache parameters via CPUID. Using fallback values." << endl;
+    return false;
+}
 
 bool pinToCore(int coreId) {
 #ifdef _WIN32
@@ -22,7 +65,6 @@ bool pinToCore(int coreId) {
         cerr << "Failed to set process affinity on Windows: " << GetLastError() << endl;
         return false;
     }
-
     HANDLE thread = GetCurrentThread();
     if (SetThreadAffinityMask(thread, affinityMask) == 0) {
         cerr << "Failed to set thread affinity on Windows: " << GetLastError() << endl;
@@ -34,7 +76,6 @@ bool pinToCore(int coreId) {
     cpu_set_t mask;
     CPU_ZERO(&mask);
     CPU_SET(coreId, &mask);
-
     pid_t pid = getpid();
     if (sched_setaffinity(pid, sizeof(cpu_set_t), &mask) == -1) {
         perror("Failed to set affinity on Linux");
@@ -63,9 +104,7 @@ int selectPerformanceCore() {
         return 0;
     }
     for (int i = 0; i < CPU_SETSIZE; i++) {
-        if (CPU_ISSET(i, &mask)) {
-            return i;
-        }
+        if (CPU_ISSET(i, &mask)) return i;
     }
     return 0;
 #else
@@ -74,13 +113,18 @@ int selectPerformanceCore() {
 #endif
 }
 
-int calculateOptimalBlockSize(int l1CacheSizeKB, int associativity, int cacheLineSize) {
+int calculateOptimalBlockSize(int l1CacheSizeKB, int associativity, int cacheLineSize, int n) {
     int l1CacheSizeBytes = l1CacheSizeKB * 1024;
     int maxBlockSizeBytes = l1CacheSizeBytes / 2;
     int maxElementsPerBlock = maxBlockSizeBytes / sizeof(int);
     int maxBlockSide = static_cast<int>(sqrt(maxElementsPerBlock));
     int elementsPerCacheLine = cacheLineSize / sizeof(int);
     int alignedBlockSide = maxBlockSide - (maxBlockSide % elementsPerCacheLine);
+
+    if (n <= 256)
+        alignedBlockSide = min(alignedBlockSide, 32);
+    else if (n > 1024)
+        alignedBlockSide = min(max(alignedBlockSide, 64), n);
 
     int totalCacheLines = l1CacheSizeBytes / cacheLineSize;
     int numSets = totalCacheLines / associativity;
@@ -134,12 +178,11 @@ int main() {
         cout << "Pinned to core " << selectedCore << endl;
     }
 
-    int l1CacheSizeKB = 48;
-    int associativity = 12;
-    int cacheLineSize = 64;
-
-    int optimalBlockSize = calculateOptimalBlockSize(l1CacheSizeKB, associativity, cacheLineSize);
-    cout << "Calculated optimal blockSize: " << optimalBlockSize << endl;
+    int l1CacheSizeKB, associativity, cacheLineSize;
+    if (getCacheParameters(l1CacheSizeKB, associativity, cacheLineSize)) {
+        cout << "Detected L1 cache size: " << l1CacheSizeKB << " KB, Associativity: " << associativity
+             << ", Cache line size: " << cacheLineSize << " bytes" << endl;
+    }
 
     vector<int> matrixSizes = {128, 256, 512, 1024, 4096};
     vector<int> blockSizes = {8, 16, 32, 64, 128};
@@ -153,6 +196,9 @@ int main() {
     vector<Result> results;
 
     for (int n : matrixSizes) {
+        int optimalBlockSize = calculateOptimalBlockSize(l1CacheSizeKB, associativity, cacheLineSize, n);
+        cout << "Matrix size n = " << n << ", Calculated optimal blockSize: " << optimalBlockSize << endl;
+
         vector<vector<int>> A(n, vector<int>(n));
         vector<vector<int>> B(n, vector<int>(n, 0));
         for (int i = 0; i < n; i++) {
@@ -163,7 +209,7 @@ int main() {
 
         vector<vector<int>> B_naive = B;
         double naiveTime = measureTime(A, B_naive, n, 0, false);
-        cout << "\nMatrix size n = " << n << ", Naive transpose time: " << naiveTime << " ms" << endl;
+        cout << "Matrix size n = " << n << ", Naive transpose time: " << naiveTime << " ms" << endl;
 
         cout << "Testing block transpose for n = " << n << endl;
         double minBlockTime = numeric_limits<double>::max();
@@ -184,6 +230,7 @@ int main() {
     cout << "\nSummary of minimum times:\n";
     for (const auto& res : results) {
         cout << "Matrix size n = " << res.n << ":\n";
+        cout << " Calculated optimal blockSize: " << calculateOptimalBlockSize(l1CacheSizeKB, associativity, cacheLineSize, res.n) << "\n";
         cout << "  Naive transpose: " << res.naiveTime << " ms\n";
         cout << "  Best block transpose: " << res.minBlockTime << " ms (blockSize = " << res.bestBlockSize << ")\n";
         if (res.naiveTime < res.minBlockTime) {
